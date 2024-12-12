@@ -1,98 +1,131 @@
-# Tải các thư viện cần thiết
 library(shiny)
-library(tm)
-library(wordcloud)
-library(RColorBrewer)
+library(rvest)
 library(dplyr)
-library(readr)
+library(wordcloud)
+library(tm)
 
-# Danh sách stopwords tiếng Việt (mở rộng theo yêu cầu)
-vietnamese_stopwords <- c(
-  "và", "của", "theo", "để", "trong", "là", "với", "có", "là",
-  "này", "đã", "chúng", "một", "các", "trên", "sẽ", "như", "vào",
-  "lúc", "được", "bằng", "khi", "nhiều", "còn", "vì", "cũng", "điều",
-  "sử", "dụng", "không", "là", "nên", "thì", "đến", "vẫn", "hoặc"
+# stop words trong Tiếng Việt
+stopwords_vi <- c(
+  "và", "là", "của", "có", "cho", "để", "với", "như", "một", 
+  "này", "nên", "ra", "vào", "lại", "lên", "xuống", "đó", 
+  "đây", "kia", "đã", "đang", "sẽ", "cũng", "thì", "ở", "khi",
+  "được", "bị", "do", "nếu", "hoặc", "vậy", "vì", "sao", "rất",
+  "những", "các", "tại", "hơn", "không", "trong", "từ"
 )
 
-# Đọc dữ liệu từ file CSV
-data <- read_csv("vnexpress_technology.csv")
-
-# Làm sạch và kết hợp các cột title, description, content thành một văn bản
-clean_data <- data %>%
-  filter(!is.na(title) & !is.na(description) & !is.na(content)) %>%
-  filter(title != "" & description != "" & content != "") # Lọc bỏ dòng trống
-
-# Kết hợp các cột thành một văn bản duy nhất
-text_data <- paste(clean_data$title, clean_data$description, clean_data$content, collapse = " ")
-
-# Hàm xử lý văn bản
-getTermMatrix <- function(text) {
-  # Tạo corpus
-  myCorpus <- Corpus(VectorSource(text))
-
-  # Xử lý văn bản: chuyển sang chữ thường, loại bỏ dấu câu, số, từ dừng
-  myCorpus <- tm_map(myCorpus, content_transformer(tolower)) # Chuyển sang chữ thường
-  myCorpus <- tm_map(myCorpus, removePunctuation) # Loại bỏ dấu câu
-  myCorpus <- tm_map(myCorpus, removeNumbers) # Loại bỏ số
-
-  # Loại bỏ các từ stopwords tiếng Việt
-  myCorpus <- tm_map(myCorpus, removeWords, vietnamese_stopwords) # Loại bỏ stopwords tiếng Việt
-
-  # Kiểm tra dữ liệu trong corpus
-  if (length(myCorpus) > 0) {
-    # Tạo ma trận tần suất từ
-    tdm <- TermDocumentMatrix(myCorpus)
-    m <- as.matrix(tdm)
-    v <- rowSums(m)
-    v <- sort(v, decreasing = TRUE)
-    return(v)
-  } else {
-    return(NULL) # Trả về NULL nếu không có dữ liệu hợp lệ
-  }
+crawl_vnexpress <- function() {
+  base_url <- "https://vnexpress.net/so-hoa/cong-nghe"
+  response <- read_html(base_url)
+  
+  articles <- response %>%
+    html_nodes(".title-news a") %>%
+    html_attr("href") %>%
+    unique()
+  
+  data <- lapply(articles, function(link) {
+    page <- tryCatch(read_html(link), error = function(e) NULL)
+    if (is.null(page)) return(NULL)
+    
+    title <- page %>% html_node(".title-detail") %>% html_text(trim = TRUE)
+    description <- page %>% html_node(".description") %>% html_text(trim = TRUE)
+    content <- page %>%
+      html_nodes(".fck_detail p") %>%
+      html_text(trim = TRUE) %>%
+      paste(collapse = " ")
+    
+    data.frame(Title = title, URL = link, Description = description, Content = content, stringsAsFactors = FALSE)
+  })
+  
+  do.call(rbind, data)
 }
 
-# Ứng dụng Shiny
 ui <- fluidPage(
-  titlePanel("Word Cloud từ dữ liệu VNExpress"),
+  titlePanel("Crawl dữ liệu VnExpress: Số hóa - Công nghệ"),
+  
   sidebarLayout(
     sidebarPanel(
-      # Đặt tệp csv trong thư mục làm việc
-      fileInput("file", "Chọn tệp CSV", accept = c(".csv"))
+      dateInput("date", "Chọn ngày:", value = Sys.Date(), format = "yyyy-mm-dd"),
+      selectInput("data_type", "Chọn loại dữ liệu:", 
+                  choices = c("Title" = "title", 
+                              "Description" = "description", 
+                              "Content" = "content")),
+      actionButton("process", "Xử lý dữ liệu"),
+      downloadButton("download_csv", "Tải xuống CSV")
     ),
+    
     mainPanel(
-      plotOutput("wordCloudPlot") # Hiển thị word cloud
+      plotOutput("wordcloud"),
+      textOutput("message")
     )
   )
 )
 
-server <- function(input, output) {
-  # Xử lý tệp được tải lên
-  observeEvent(input$file, {
-    # Đọc dữ liệu từ tệp CSV
-    data <- read_csv(input$file$datapath)
-
-    # Làm sạch dữ liệu
-    clean_data <- data %>%
-      filter(!is.na(title) & !is.na(description) & !is.na(content)) %>%
-      filter(title != "" & description != "" & content != "")
-
-    # Kết hợp các cột title, description, content thành một văn bản
-    text_data <- paste(clean_data$title, clean_data$description, clean_data$content, collapse = " ")
-
-    # Xử lý và tạo Word Cloud
-    term_freq <- getTermMatrix(text_data)
-
-    output$wordCloudPlot <- renderPlot({
-      # Nếu có dữ liệu hợp lệ, tạo word cloud
-      if (!is.null(term_freq)) {
-        wordcloud(names(term_freq), term_freq, scale = c(3, 0.5), colors = brewer.pal(8, "Dark2"))
+server <- function(input, output, session) {
+  csv_folder <- "data/"  
+   
+  observeEvent(input$process, {
+    selected_date <- input$date
+    today <- Sys.Date()
+    
+    if (selected_date > today) {
+      output$message <- renderText("Ngày bạn chọn là ngày trong tương lai, hiện tại chưa có dữ liệu. Vui lòng chọn ngày khác.")
+      output$wordcloud <- renderPlot({ NULL })
+      return()
+    }
+    
+    csv_file <- paste0(csv_folder, "vnexpress_data_", selected_date, ".csv")
+    if (file.exists(csv_file)) {
+      data <- read.csv(csv_file, stringsAsFactors = FALSE, fileEncoding = "UTF-8")
+      output$message <- renderText(paste("Dữ liệu wordcloud của ngày:", selected_date))
+    } else if (selected_date == today) {
+      data <- crawl_vnexpress()
+      if (!is.null(data) && nrow(data) > 0) {
+        write.csv(data, csv_file, row.names = FALSE, fileEncoding = "UTF-8")
+        output$message <- renderText("Dữ liệu ngày hiện tại đã được crawl và lưu.")
       } else {
+        output$message <- renderText("Không thể crawl dữ liệu cho ngày hiện tại.")
+        output$wordcloud <- renderPlot({ NULL })
+        return()
+      }
+    } else {
+      output$message <- renderText("Không tìm thấy dữ liệu cho ngày được chọn.")
+      output$wordcloud <- renderPlot({ NULL })
+      return()
+    }
+    
+    output$wordcloud <- renderPlot({
+      req(input$data_type)
+      text <- paste(data[[input$data_type]], collapse = " ")
+      if (nchar(text) == 0) {
         plot.new()
         text(0.5, 0.5, "Không có dữ liệu để tạo Word Cloud", cex = 1.5)
+        return()
       }
+      
+      corpus <- Corpus(VectorSource(text))
+      corpus <- tm_map(corpus, content_transformer(tolower))
+      corpus <- tm_map(corpus, removePunctuation)
+      corpus <- tm_map(corpus, removeNumbers)
+      corpus <- tm_map(corpus, removeWords, c(stopwords("en"), stopwords_vi))
+      
+      wordcloud(words = corpus, max.words = 100, random.order = FALSE, colors = brewer.pal(8, "Dark2"))
     })
   })
+  
+  output$download_csv <- downloadHandler(
+    filename = function() {
+      paste("vnexpress_data_", input$date, ".csv", sep = "")
+    },
+    content = function(file) {
+      selected_date <- input$date
+      csv_file <- paste0(csv_folder, "vnexpress_data_", selected_date, ".csv")
+      if (file.exists(csv_file)) {
+        file.copy(csv_file, file)
+      } else {
+        stop("Không có file CSV để tải xuống.")
+      }
+    }
+  )
 }
 
-# Chạy ứng dụng Shiny
 shinyApp(ui = ui, server = server)
